@@ -1,7 +1,7 @@
 {
   "name": "napcat-plugin-importer",
   "plugin": "插件导入器",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "type": "module",
   "main": "index.mjs",
   "description": "在 WebUI 里恢复「导入插件」页面与接口：上传本地 zip 即可安装/启用插件（任何带插件系统的 NapCat 版本可用）",

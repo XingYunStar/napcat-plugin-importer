@@ -58,6 +58,12 @@ jobs:
       - name: Show package contents
         run: unzip -l dist/napcat-plugin-importer.zip
 
+      # ⚠️ 这里必须用 INDEX_PAT，不能用内置 GITHUB_TOKEN：
+      # GitHub 规定「用内置 GITHUB_TOKEN 产生的事件不会触发新的工作流运行」（防递归），
+      # 若用内置 token 创建 Release，release: published 事件会被静默丢弃，
+      # 下游的 update-index.yml 永远不会被自动触发（只能手动 dispatch）。
+      # 用 PAT 创建 Release 才能正常触发 update-index.yml。
+      # 需要仓库 secret：INDEX_PAT（Personal Access Token，需 repo 权限）
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
@@ -67,5 +73,4 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.INDEX_PAT }}
