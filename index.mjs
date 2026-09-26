@@ -112,7 +112,7 @@ function effectiveToken (ctx) {
 
 const bearerOf = (req) => {
   const h = req.headers && (req.headers.authorization || req.headers.Authorization);
-  const m = /^Bearer\s+(.+)$/i.exec(String(h || ''));
+  const m = String(h || '').match(/^\s*Bearer\s+(.+)$/i);
   if (m) return m[1].trim();
   const q = req.query && (req.query.token || req.query.webui_token);
   return q ? String(Array.isArray(q) ? q[0] : q).trim() : '';
