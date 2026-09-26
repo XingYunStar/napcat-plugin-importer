@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>导入插件</title>
+<style>
+  :root { color-scheme: light dark; --bg:#fff; --fg:#18181b; --sub:#71717a; --line:#e4e4e7; --card:#fafafa; --pri:#006fee; --ok:#17c964; --warn:#f5a524; --err:#f31260; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --fg:#ecedee; --sub:#a1a1aa; --line:#27272a; --card:#18181b; } }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
+         font:14px/1.6 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  h2 { font-size:14px; margin:20px 0 4px; }
+  .sub { color:var(--sub); font-size:12px; margin-bottom:14px; }
+  .drop { border:2px dashed var(--line); border-radius:12px; padding:28px 16px; text-align:center;
+          background:var(--card); transition:.15s; cursor:pointer; }
+  .drop.hover { border-color:var(--pri); background:color-mix(in srgb, var(--pri) 8%, var(--card)); }
+  .drop b { color:var(--pri); }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:12px; }
+  button { font:inherit; padding:7px 14px; border-radius:8px; border:1px solid var(--line);
+           background:var(--card); color:var(--fg); cursor:pointer; }
+  button.primary { background:var(--pri); border-color:var(--pri); color:#fff; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.danger { color:var(--err); border-color:var(--err); }
+  input[type=password], input[type=text] { font:inherit; padding:8px 10px; border-radius:8px; border:1px solid var(--line);
+           background:var(--bg); color:var(--fg); min-width:240px; }
+  .msg { margin-top:12px; padding:10px 12px; border-radius:8px; border:1px solid var(--line); background:var(--card); display:none; white-space:pre-wrap; }
+  .msg.show { display:block; } .msg.ok { border-color:var(--ok); } .msg.err { border-color:var(--err); } .msg.warn { border-color:var(--warn); }
+  table { width:100%; border-collapse:collapse; margin-top:8px; font-size:13px; }
+  th,td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  th { color:var(--sub); font-weight:600; font-size:12px; }
+  .badge { display:inline-block; padding:1px 7px; border-radius:999px; font-size:11px; border:1px solid var(--line); }
+  .badge.on { color:#fff; background:var(--ok); border-color:var(--ok); }
+  .badge.off { color:var(--sub); }
+  .bar { height:6px; border-radius:3px; background:var(--line); overflow:hidden; margin-top:10px; display:none; }
+  .bar.show { display:block; } .bar > i { display:block; height:100%; width:0; background:var(--pri); transition:width .2s; }
+  code { background:var(--card); border:1px solid var(--line); border-radius:5px; padding:1px 5px; font-size:12px; }
+  .gate { border:1px solid var(--line); border-radius:12px; padding:20px; background:var(--card); max-width:560px; }
+  .hide { display:none !important; }
+</style>
+</head>
+<body>
+  <h1>📦 导入插件</h1>
+  <div class="sub">上传本地插件 zip，自动解压到 <code>plugins/</code>、写入启用状态并热加载。<b>需要鉴权。</b></div>
+
+  <!-- 未通过鉴权时只显示这一块 -->
+  <div class="gate" id="gate">
+    <div style="font-weight:600;margin-bottom:6px;">🔒 需要鉴权</div>
+    <div class="sub" style="margin-bottom:12px;">
+      两种任选其一：<br />
+      ① 直接点「使用 WebUI 登录凭证」——和当前 WebUI 登录状态共用同一凭证（推荐，无需输入）；<br />
+      ② 输入访问口令：默认就是 WebUI 的登录 token（容器里 <code>/app/napcat/config/webui.json</code> 的 <code>token</code>，也可在插件配置里单独设置）。
+    </div>
+    <div class="row">
+      <button class="primary" id="useCred">使用 WebUI 登录凭证</button>
+      <input type="password" id="pw" placeholder="访问口令 / WebUI token" autocomplete="off" />
+      <button id="usePw">用口令登录</button>
+    </div>
+    <div class="row"><span class="sub" id="gateHint"></span></div>
+  </div>
+
+  <!-- 通过鉴权后才显示 -->
+  <div id="main" class="hide">
+    <div class="drop" id="drop">
+      把 <b>.zip</b> 插件包拖到这里，或点击选择文件
+      <input type="file" id="file" accept=".zip,application/zip" style="display:none" />
+    </div>
+    <div class="bar" id="bar"><i id="barI"></i></div>
+    <div class="row">
+      <button class="primary" id="btn" disabled>开始导入</button>
+      <span class="sub" id="picked">未选择文件</span>
+      <button id="logout" style="margin-left:auto">退出鉴权</button>
+    </div>
+    <div class="msg" id="msg"></div>
+
+    <h2>已安装插件</h2>
+    <div class="sub">状态来自插件管理器；<code>已加载</code> 表示当前进程里活着。</div>
+    <table>
+      <thead><tr><th>插件</th><th>ID</th><th>版本</th><th>状态</th><th></th></tr></thead>
+      <tbody id="tbody"><tr><td colspan="5" class="sub">加载中…</td></tr></tbody>
+    </table>
+    <div class="row"><button id="reload">刷新列表</button><span class="sub" id="authMode"></span></div>
+  </div>
+
+<script>
+const API = '/plugin/napcat-plugin-importer/api';
+const TOKEN_KEY = 'napcat-importer-token';   // 本页面记住的口令
+const WEBUI_TOKEN_KEY = 'token';             // WebUI 自己存凭证的 key
+const $ = id => document.getElementById(id);
+let picked = null;
+let auth = null;   // 当前使用的 Authorization 头
+
+function show (text, kind) { const m = $('msg'); m.className = 'msg show ' + (kind || ''); m.textContent = text; }
+function gateHint (t) { $('gateHint').textContent = t || ''; }
+function setProgress (p) {
+  const bar = $('bar');
+  if (p === null) { bar.classList.remove('show'); return; }
+  bar.classList.add('show'); $('barI').style.width = Math.round(p * 100) + '%';
+}
+async function toBase64 (file) {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  let out = '', CH = 0x8000;
+  for (let i = 0; i < buf.length; i += CH) out += String.fromCharCode.apply(null, buf.subarray(i, i + CH));
+  return btoa(out);
+}
+/** WebUI 登录凭证（同源 localStorage，形如 JSON 字符串） */
+function webuiCredential () {
+  const raw = localStorage.getItem(WEBUI_TOKEN_KEY);
+  if (!raw) return '';
+  try { const v = JSON.parse(raw); return typeof v === 'string' ? v : ''; } catch { return raw; }
+}
+function storedToken () { return localStorage.getItem(TOKEN_KEY) || ''; }
+
+async function api (p, opt = {}) {
+  const headers = Object.assign({}, opt.headers || {});
+  if (auth) headers.Authorization = 'Bearer ' + auth;
+  const r = await fetch(API + p, Object.assign({}, opt, { headers }));
+  const j = await r.json().catch(() => ({ code: -1, message: 'HTTP ' + r.status }));
+  if (r.status === 401) { auth = null; showGate('凭证已失效，请重新鉴权'); throw Object.assign(new Error(j.message || 'Unauthorized'), { auth: true }); }
+  return j;
+}
+
+function showMain (mode) {
+  $('gate').classList.add('hide');
+  $('main').classList.remove('hide');
+  $('authMode').textContent = mode ? '鉴权方式：' + mode : '';
+}
+function showGate (hint) {
+  $('main').classList.add('hide');
+  $('gate').classList.remove('hide');
+  gateHint(hint || '');
+}
+
+/** 尝试用一个候选凭证登录；成功返回 true */
+async function tryAuth (candidate, remember) {
+  if (!candidate) return false;
+  auth = candidate;
+  try {
+    const j = await api('/whoami');
+    if (j && j.code === 0) {
+      if (remember === 'token') localStorage.setItem(TOKEN_KEY, candidate);
+      showMain(j.data && j.data.mode);
+      await refresh();
+      return true;
+    }
+  } catch { /* 失败继续 */ }
+  auth = null;
+  return false;
+}
+
+async function autoLogin () {
+  gateHint('正在用当前 WebUI 登录状态校验…');
+  if (await tryAuth(webuiCredential())) return;              // ① WebUI 凭证
+  if (await tryAuth(storedToken(), 'token')) return;         // ② 上次记住的口令
+  showGate('未检测到有效凭证。可点「使用 WebUI 登录凭证」，或输入访问口令。');
+}
+
+$('useCred').onclick = async () => {
+  $('useCred').disabled = true; gateHint('正在校验 WebUI 凭证…');
+  const ok = await tryAuth(webuiCredential());
+  $('useCred').disabled = false;
+  if (!ok) gateHint('WebUI 凭证无效或已过期，请重新登录 WebUI 后再试，或改用访问口令。');
+};
+$('usePw').onclick = async () => {
+  const v = $('pw').value.trim();
+  if (!v) { gateHint('请输入访问口令'); return; }
+  gateHint('正在校验口令…');
+  if (await tryAuth(v, 'token')) { $('pw').value = ''; return; }
+  gateHint('口令不正确。默认口令是 WebUI 的 token（config/webui.json）。');
+};
+$('pw').addEventListener('keydown', e => { if (e.key === 'Enter') $('usePw').click(); });
+$('logout').onclick = () => { localStorage.removeItem(TOKEN_KEY); auth = null; showGate('已退出鉴权。'); };
+
+// ---------------- 导入 / 列表 ----------------
+$('drop').addEventListener('click', () => $('file').click());
+$('drop').addEventListener('dragover', e => { e.preventDefault(); $('drop').classList.add('hover'); });
+$('drop').addEventListener('dragleave', () => $('drop').classList.remove('hover'));
+$('drop').addEventListener('drop', e => {
+  e.preventDefault(); $('drop').classList.remove('hover');
+  const f = e.dataTransfer.files && e.dataTransfer.files[0]; if (f) pick(f);
+});
+$('file').addEventListener('change', e => { const f = e.target.files[0]; if (f) pick(f); });
+
+function pick (f) {
+  if (!/\.zip$/i.test(f.name)) { show('请选择 .zip 格式的插件包', 'err'); return; }
+  picked = f;
+  $('picked').textContent = f.name + '（' + (f.size / 1024).toFixed(0) + ' KB）';
+  $('btn').disabled = false;
+  show('已选择：' + f.name + '，点「开始导入」', '');
+}
+
+$('btn').addEventListener('click', async () => {
+  if (!picked) return;
+  $('btn').disabled = true;
+  try {
+    show('正在读取并上传…', ''); setProgress(0.1);
+    const base64 = await toBase64(picked);
+    setProgress(0.5);
+    const j = await api('/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: picked.name, base64 })
+    });
+    setProgress(null);
+    if (j.code !== 0) { show('❌ 导入失败：' + j.message, 'err'); return; }
+    const d = j.data;
+    show('✅ ' + d.message
+      + '\n插件 ID：' + d.pluginId + '　版本：' + d.version + '　文件数：' + d.files
+      + '\n安装位置：' + d.installPath
+      + (d.needRestart ? '\n\n⚠️ 需要重启 NapCat（docker restart <容器名>）后生效' : ''),
+      d.needRestart ? 'warn' : 'ok');
+    await refresh();
+  } catch (e) {
+    setProgress(null);
+    if (!e.auth) show('❌ 请求失败：' + e.message, 'err');
+  } finally { $('btn').disabled = false; }
+});
+
+async function refresh () {
+  const tb = $('tbody');
+  try {
+    const j = await api('/list');
+    if (j.code !== 0) { tb.innerHTML = '<tr><td colspan="5" class="sub">' + j.message + '</td></tr>'; return; }
+    const list = (j.data && j.data.plugins) || [];
+    if (!list.length) { tb.innerHTML = '<tr><td colspan="5" class="sub">没有扫描到插件</td></tr>'; return; }
+    tb.innerHTML = '';
+    for (const p of list) {
+      const tr = document.createElement('tr');
+      const st = p.loaded ? '<span class="badge on">已加载</span>'
+        : (p.enable ? '<span class="badge off">已启用/未加载</span>' : '<span class="badge off">已禁用</span>');
+      tr.innerHTML = '<td>' + (p.name || '') + (p.description ? '<div class="sub">' + p.description + '</div>' : '') + '</td>'
+        + '<td><code>' + p.id + '</code></td><td>' + (p.version || '') + '</td><td>' + st + '</td><td></td>';
+      const td = tr.lastElementChild;
+      if (p.id !== 'napcat-plugin-importer') {
+        const b = document.createElement('button');
+        b.textContent = '卸载'; b.className = 'danger';
+        b.onclick = async () => {
+          if (!confirm('确定卸载 ' + p.id + ' ？')) return;
+          try {
+            const jj = await api('/uninstall', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: p.id })
+            });
+            show(jj.code === 0 ? '✅ ' + jj.data.message : '❌ ' + jj.message, jj.code === 0 ? 'ok' : 'err');
+            refresh();
+          } catch (e) { if (!e.auth) show('❌ ' + e.message, 'err'); }
+        };
+        td.appendChild(b);
+      }
+      tb.appendChild(tr);
+    }
+  } catch (e) {
+    if (!e.auth) tb.innerHTML = '<tr><td colspan="5" class="sub">读取失败：' + e.message + '</td></tr>';
+  }
+}
+$('reload').addEventListener('click', refresh);
+
+autoLogin();
+</script>
+</body>
+</html>

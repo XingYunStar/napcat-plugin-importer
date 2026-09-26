@@ -1,0 +1,20 @@
+# 依赖
+node_modules/
+package-lock.json
+
+# 构建 / 发布产物
+dist/
+*.zip
+!test/**/*.zip
+
+# 日志与临时文件
+*.log
+npm-debug.log*
+.tmp/
+*.tmp
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

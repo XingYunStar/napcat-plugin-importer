@@ -1,0 +1,71 @@
+name: Release Plugin
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g., v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Syntax check
+        run: |
+          node --check index.mjs
+          node --check webui/inject.js
+
+      - name: Create plugin zip
+        run: |
+          mkdir -p dist
+          # 只打包运行期必需的文件（test/ 仅用于本地测试，不进发布包）
+          zip -r dist/napcat-plugin-importer.zip \
+            index.mjs \
+            package.json \
+            README.md \
+            LICENSE \
+            webui/import.html \
+            webui/inject.js \
+            -x "*.git*" -x ".github/*" -x "test/*" -x "node_modules/*"
+
+      - name: Show package contents
+        run: unzip -l dist/napcat-plugin-importer.zip
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          files: dist/*.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
