@@ -37,7 +37,9 @@ const DEFAULT_CONFIG = {
   trustWebUiCredential: true,
   accessToken: '',
   allowPage: true,
-  injectButton: true
+  injectButton: true,
+  injectWatch: true,
+  injectWatchIntervalMs: 5000
 };
 
 // ============================================================================
@@ -54,7 +56,11 @@ export const plugin_config_schema = [
   { key: 'allowPage', type: 'boolean', label: '注册 WebUI 扩展页面', default: true,
     description: 'NapCat 的扩展页面本身是免鉴权下发的；关掉后只能用带凭证的 HTTP 接口' },
   { key: 'injectButton', type: 'boolean', label: '把「导入插件」按钮注入到插件管理页', default: true,
-    description: '往 WebUI 的 static/index.html 注入一行脚本（原文件备份为 index.html.napcat-importer.bak），按钮位置/样式与官方原版一致' }
+    description: '把按钮脚本内联进 WebUI 的 static/index.html（原文件备份为 index.html.napcat-importer.bak），位置/样式与官方原版一致' },
+  { key: 'injectWatch', type: 'boolean', label: '守护注入（被其它工具覆盖后自动补回）', default: true,
+    description: '监听 index.html，发现注入被覆盖（例如面板脚本重写了它）就自动重新注入；事件驱动 + 轮询兜底' },
+  { key: 'injectWatchIntervalMs', type: 'number', label: '守护轮询间隔(毫秒)', default: 5000,
+    description: 'inotify 事件在部分场景（宿主机 docker cp 写入）不会触发，故保留轮询兜底；设为 0 则只依赖事件' }
 ];
 
 const cfgPath = (ctx) => ctx.configPath || path.join(ctx.dataPath || '.', 'config.json');
@@ -112,7 +118,7 @@ function effectiveToken (ctx) {
 
 const bearerOf = (req) => {
   const h = req.headers && (req.headers.authorization || req.headers.Authorization);
-  const m = String(h || '').match(/^\s*Bearer\s+(.+)$/i);
+  const m = /^Bearer\s+(.+)$/i.exec(String(h || ''));
   if (m) return m[1].trim();
   const q = req.query && (req.query.token || req.query.webui_token);
   return q ? String(Array.isArray(q) ? q[0] : q).trim() : '';
@@ -394,6 +400,26 @@ function webuiSnippet (ctx) {
 }
 
 /** 往 static/index.html 注入按钮脚本（幂等；首次会自动备份原文件） */
+/**
+ * 原子替换文件内容：先写同目录下的临时文件，再 rename 覆盖目标。
+ * 关键点：rename 只需要**目录**写权限，不需要目标文件的写权限——
+ * 所以「index.html 属主是 root、NapCat 以 napcat 用户运行」这种场景也能成功
+ * （实测症状：直接 writeFileSync 报 EACCES: permission denied）。
+ * 若目录也不可写，则退回直接写（目标文件自身可写时仍能成功）。
+ */
+export function writeFileAtomic (p, content) {
+  const tmp = path.join(path.dirname(p), `.napcat-importer.${process.pid}.${Date.now()}.tmp`);
+  try {
+    fs.writeFileSync(tmp, content, 'utf8');
+    fs.renameSync(tmp, p);
+    return 'rename';
+  } catch (e) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
+    fs.writeFileSync(p, content, 'utf8');
+    return 'write';
+  }
+}
+
 export function injectWebUiButton (ctx) {
   const p = webuiIndexPath(ctx);
   let html;
@@ -411,16 +437,27 @@ export function injectWebUiButton (ctx) {
     : (html.includes('</body>') ? html.replace('</body>', snippet + '</body>') : html + '\n' + snippet);
   if (out === html) return true; // 已是最新，无需改动
 
+  let bak = '';
   try {
-    const bak = p + '.napcat-importer.bak';
-    if (!fs.existsSync(bak)) fs.copyFileSync(p, bak);
-    fs.writeFileSync(p, out, 'utf8');
+    bak = p + '.napcat-importer.bak';
+    if (!fs.existsSync(bak)) fs.copyFileSync(p, bak);   // 备份失败不阻断注入
+  } catch { bak = ''; }
+
+  try {
+    const how = writeFileAtomic(p, out);
     log(hadMarker
       ? `已更新 WebUI 里注入的「导入插件」脚本（${p}，浏览器需刷新一次）`
-      : `已把「导入插件」按钮内联进 WebUI：${p}（原文件备份 ${path.basename(bak)}）`);
+      : `已把「导入插件」按钮内联进 WebUI：${p}（${how === 'rename' ? '临时文件+rename' : '直接写入'}${bak ? '，原文件备份 ' + path.basename(bak) : ''}）`);
     return true;
   } catch (e) {
-    log('注入按钮失败：' + (e && e.message));
+    log(`注入按钮失败：${e && e.message}`);
+    if (/EACCES|EPERM/.test(String(e && e.message))) {
+      const dir = path.dirname(p);
+      log(`  原因：${p} 的属主可能不是运行 NapCat 的用户（容器里通常是 napcat），且目录 ${dir} 也不可写。`);
+      log('  解决（宿主机执行，把 <容器名> 换掉）：');
+      log('    docker exec -u 0 <容器名> chown -R napcat:napcat ' + dir);
+      log('  然后重启容器，或在 WebUI 插件管理里把「插件导入器」关掉再打开，让注入重试。');
+    }
     return false;
   }
 }
@@ -437,6 +474,75 @@ export function removeInjectedWebUiButton (ctx) {
     log('已移除 WebUI 里注入的「导入插件」按钮');
     return true;
   } catch { return false; }
+}
+
+let injectTimer = null;
+let injectWatcher = null;
+let injectDebounce = null;
+
+/** 检查注入是否还在，被覆盖就补回（被 injectWatch 定时调用，也可手动调） */
+export function ensureWebUiInjection (ctx) {
+  const p = webuiIndexPath(ctx);
+  try {
+    const html = fs.readFileSync(p, 'utf8');
+    if (html.includes(WEBUI_MARK)) return false;
+    log('检测到注入已被覆盖（可能有其它工具重写了 index.html），正在重新注入…');
+    return injectWebUiButton(ctx);
+  } catch (e) {
+    log('守护注入时读不到 index.html：' + (e && e.message));
+    return false;
+  }
+}
+
+/** 事件合并：一次外部重写可能触发多个 inotify 事件，防抖后再检查 */
+function scheduleInjectionCheck (ctx) {
+  if (injectDebounce) return;
+  injectDebounce = setTimeout(() => {
+    injectDebounce = null;
+    try { ensureWebUiInjection(ctx); } catch { /* ignore */ }
+  }, 300);
+  if (injectDebounce && typeof injectDebounce.unref === 'function') injectDebounce.unref();
+}
+
+/**
+ * 守护注入：
+ *  ① 事件驱动 —— fs.watch 监听 static 目录（不能监听文件本身：文件常被 rename 整体替换，watcher 会失效），
+ *     外部工具一改就立刻发现（毫秒级）
+ *  ② 轮询兜底 —— 宿主机通过 docker cp / 直接写 overlay upper 的方式改动，容器内的 inotify 不一定收到事件，
+ *     所以保留一个短间隔轮询（默认 5 秒，可在插件配置里调整，设 0 则只靠事件）
+ */
+function startInjectWatch (ctx) {
+  if (injectWatcher || injectTimer) return;
+  const p = webuiIndexPath(ctx);
+  const dir = path.dirname(p);
+  const base = path.basename(p);
+  const cfg = loadConfig(ctx);
+
+  try {
+    injectWatcher = fs.watch(dir, { persistent: false }, (_ev, name) => {
+      if (name && String(name) !== base) return; // 只关心 index.html
+      scheduleInjectionCheck(ctx);
+    });
+    if (injectWatcher && typeof injectWatcher.unref === 'function') injectWatcher.unref();
+    log(`守护注入：已监听 ${dir}（inotify 事件驱动）`);
+  } catch (e) {
+    injectWatcher = null;
+    log(`守护注入：fs.watch 不可用（${e && e.message}），改用轮询`);
+  }
+
+  const iv = Number(cfg.injectWatchIntervalMs);
+  if (!Number.isFinite(iv) || iv > 0) {
+    const ms = Number.isFinite(iv) && iv > 0 ? iv : 5000;
+    injectTimer = setInterval(() => { try { ensureWebUiInjection(ctx); } catch { /* ignore */ } }, ms);
+    if (injectTimer && typeof injectTimer.unref === 'function') injectTimer.unref();
+    log(`守护注入：轮询间隔 ${ms}ms（兜底）`);
+  }
+}
+
+function stopInjectWatch () {
+  if (injectTimer) { clearInterval(injectTimer); injectTimer = null; }
+  if (injectWatcher) { try { injectWatcher.close(); } catch { /* ignore */ } injectWatcher = null; }
+  if (injectDebounce) { clearTimeout(injectDebounce); injectDebounce = null; }
 }
 
 // ============================================================================
@@ -618,7 +724,10 @@ export const plugin_init = async (ctx) => {
   }
 
   // 把按钮注入 WebUI 主页面（「插件管理」页）
-  if (cfg.injectButton) injectWebUiButton(ctx);
+  if (cfg.injectButton) {
+    injectWebUiButton(ctx);
+    if (cfg.injectWatch) startInjectWatch(ctx);
+  }
 
   log(`已注册：${cfg.allowPage ? '页面 /plugin/' + PLUGIN_ID + '/page/import ；' : ''}接口 /api/Plugin/ext/${PLUGIN_ID}/import`);
   log(`WebUI 按钮注入：${cfg.injectButton ? '开' : '关'}；静态资源 /plugin/${PLUGIN_ID}/files/static/`);
@@ -626,6 +735,7 @@ export const plugin_init = async (ctx) => {
 };
 
 export const plugin_cleanup = async (ctx) => {
+  stopInjectWatch();
   if (ctx && loadConfig(ctx).injectButton !== false) removeInjectedWebUiButton(ctx);
 };
 

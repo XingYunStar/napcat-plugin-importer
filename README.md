@@ -65,13 +65,16 @@ docker cp napcat:/app/napcat/plugins/. /opt/napcat-plugins/
 
 ### ③ HTTP 接口
 
-| 用途 | 路径 | 鉴权 |
+| 用途 | 路径 | 接受哪种凭证 |
 |---|---|---|
-| 导入插件 | `POST /plugin/napcat-plugin-importer/api/import` | 需要 |
-| 导入插件 | `POST /api/Plugin/ext/napcat-plugin-importer/import` | 需要 |
-| 插件列表 | `GET  /plugin/napcat-plugin-importer/api/list` | 需要 |
-| 卸载插件 | `POST /plugin/napcat-plugin-importer/api/uninstall` | 需要 |
-| 探活 | `GET  /plugin/napcat-plugin-importer/api/whoami` | 需要 |
+| 导入插件 | `POST /plugin/napcat-plugin-importer/api/import` | 登录凭证 **或** webui.json 的 token |
+| 插件列表 | `GET  /plugin/napcat-plugin-importer/api/list` | 同上 |
+| 卸载插件 | `POST /plugin/napcat-plugin-importer/api/uninstall` | 同上 |
+| 探活 | `GET  /plugin/napcat-plugin-importer/api/whoami` | 同上 |
+| 导入插件 | `POST /api/Plugin/ext/napcat-plugin-importer/import` | **只认登录凭证**（NapCat 自己的鉴权中间件先拦一道） |
+
+> 区别见下面「两种凭证」：走 `/api/...` 的路径由 NapCat 的中间件先校验，必须用登录凭证；
+> 走 `/plugin/.../api/...` 的路径由本插件自己校验，所以 webui.json 里的 token 可以直接当访问口令用。
 
 请求体二选一：`application/octet-stream`（原始 zip）或 `application/json`（`{"filename":"x.zip","base64":"..."}`）。
 
@@ -97,7 +100,50 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 
 ## 鉴权
 
-默认开启，凭证两种任选其一，放在 `Authorization: Bearer <值>` 或 `?token=<值>`：
+默认开启。先分清两样东西——它们**不是**同一个值：
+
+| | 原始 token（口令） | 登录凭证 Credential |
+|---|---|---|
+| 在哪 | `config/webui.json` 的 `"token"`（明文，长期有效） | `POST /api/auth/login` 的返回；浏览器存在 `localStorage['token']` |
+| 长相 | 一串随机字符串 | `base64(JSON{Data:{CreatedTime,HashEncoded},Hmac:…})` |
+| 有效期 | 长期（改它需重启 NapCat，服务端启动时已缓存） | **1 小时**；登出/改密即失效 |
+| 签名密钥 | — | `NAPCAT_WEBUI_JWT_SECRET_KEY` 环境变量，未设置则为进程内随机数 |
+| 过 NapCat 自己的 `/api/*` | ❌ 不行（`{"code":-1,"message":"Unauthorized"}`） | ✅ 可以 |
+| 过本插件的接口 | ✅ 可以（当访问口令） | ✅ 可以（代理给 `/api/auth/check` 校验） |
+
+用 token 换一个登录凭证（**纯 shell，不需要 python / node / jq**；前端登录发的就是这个 hash）：
+
+```bash
+TOK=$(docker exec napcat sed -n 's/.*"token": *"\([^"]*\)".*/\1/p' /app/napcat/config/webui.json)
+HASH=$(printf '%s' "${TOK}.napcat" | sha256sum | cut -d' ' -f1)        # sha256(token + ".napcat")
+CRED=$(curl -s -X POST http://127.0.0.1:6003/api/auth/login \
+       -H 'Content-Type: application/json' -d "{\"hash\":\"${HASH}\"}" \
+       | sed -n 's/.*"Credential":"\([^"]*\)".*/\1/p')               # 用 sed 抠字段，无需 python
+# 之后凡是 /api/* 都用它，例如「启用/禁用插件」＝ WebUI 那个开关调的就是这个接口：
+curl -s -X POST http://127.0.0.1:6003/api/Plugin/SetStatus \
+  -H "Authorization: Bearer $CRED" -H 'Content-Type: application/json' \
+  -d '{"id":"napcat-plugin-xxx","enable":true}'
+```
+
+也可以直接用仓库里的脚本（同样纯 shell，失败会给出原因）：
+
+```bash
+CRED=$(./tools/napcat-cred.sh napcat)          # 默认容器 napcat、127.0.0.1:6003
+./tools/napcat-cred.sh napcat3 6003            # 指定容器与端口
+NAPCAT_WEBUI_TOKEN=你的token ./tools/napcat-cred.sh '' 6003   # 不经容器，直接用 token
+```
+
+> 备注：凭证 1 小时有效、登出/改密即失效；带 2FA 的 WebUI 本脚本不处理。
+> 若只是调**本插件**的接口，不必换凭证——直接用 webui.json 里的 token 当访问口令即可（不会过期）。
+> 浏览器里手动取：DevTools → Application → Local Storage → 键 `token`（值是 JSON 字符串，去掉引号就是凭证）；
+> 或 DevTools → Network → 任一 `/api/...` 请求 → Request Headers 里的 `Authorization`。
+
+> 注意：NapCat 的鉴权失败返回的是 **HTTP 200 + `{"code":-1,"message":"Unauthorized"}`**，
+> 判断成功与否要看 body 里的 `code`，不能只看 HTTP 状态码（本插件则返回真正的 401）。
+> 也支持用查询参数传：`?webui_token=<凭证>`（插件页面 iframe 就是这么用的）。
+> 若开了 2FA，`login` 第一次会返回 `require2FA:true`，需要再带上 `totpCode`。
+
+凭证两种任选其一，放在 `Authorization: Bearer <值>` 或 `?token=<值>`：
 
 1. **WebUI 登录凭证**（默认允许，页面免输入）
    导入页面与 WebUI 同源，直接复用你登录 WebUI 的凭证；插件把它代理给 WebUI 自己的
@@ -190,6 +236,33 @@ docker restart napcat
 
 ---
 
+## 点侧边栏就能看到按钮吗？
+
+能。只要**这一次页面加载**里带上了注入脚本，之后在侧边栏点「插件管理」就会**立即**出现按钮：
+
+- v1.0.3 起额外挂了路由钩子（`history.pushState` / `replaceState` / `popstate` / `hashchange`），
+  点导航栏切换路由后 **60ms 内**注入完成（此前靠 MutationObserver 的 250ms 防抖 + 1.5s 轮询兜底）
+- 还叠了启动重试阶梯（300ms/800ms/1.5s/3s/6s）、DOM 变化监听、1.5s 定时兜底
+- 万一某些改版改了页面结构（找不到 `<h1>插件管理</h1>` 锚点），在插件管理路由上会退化为右下角悬浮按钮
+
+**唯一做不到的事**：给「已经打开、但加载的是注入之前的 index.html」的页面动态塞脚本——
+这是浏览器机制（JS 必须随页面加载）。WebUI 自身也没有可借用的自动刷新通道：
+
+- Service Worker 只 `register()`，没有 `updatefound` / `controllerchange` 自动 reload
+- `request.ts` 里的 `window.location.reload()` 触发条件是「/api 返回 Unauthorized」，会顺带清掉登录态，不能用
+
+所以遇到"页面开着但没按钮"时，不按 F5 也有三条路：
+
+1. **中键 / Ctrl+点击侧边栏的「插件管理」→ 新标签页打开**：新标签是整页加载，天然带脚本
+2. **点 WebUI 的「重启进程」**：重启后前端会自己 `location.reload()`（`waitForBackendReady`），全程不用手按刷新（代价：QQ 重连约 40 秒）
+3. **把脚本写进你自己的模板**（下面是给"用面板脚本统一改 index.html"的场景）：
+   ```html
+   <!-- napcat-plugin-importer -->
+   <script src="/plugin/napcat-plugin-importer/files/static/inject.js" defer></script>
+   ```
+   外链形式依赖 `/plugin/` 路径可达；想完全不依赖，就把插件 `webui/inject.js` 的内容内联进去。
+   这样所有容器、任何一次页面加载都自带脚本，"第一次要刷新"的问题彻底消失。
+
 ## 按钮不显示？排查顺序
 
 1. **必须是"整页刷新"**：在 WebUI 里点侧边栏「插件管理」属于 SPA 内部跳转，**不会重新加载 index.html**，
@@ -202,13 +275,46 @@ docker restart napcat
    `/api/Plugin/ext/...` → `<前缀>/api/...` → `/plugin/.../api`；如果全都 404，说明反代没放行 `/api` 或 `/plugin`。
 4. **确认插件真的启用了**：插件管理页能看到「插件导入器」且开关是打开的；
    没启用则 `plugin_init` 不会执行，也就不会注入。
-5. **确认版本**：v1.0.1 起按钮脚本是内联进 index.html 的（`grep -c napcat-plugin-importer /app/napcat/static/index.html` 应为 2）。
+5. **看容器日志有没有 `注入按钮失败`**：
 
-手动回滚注入（万一需要）：
+   ```bash
+   docker logs <容器名> 2>&1 | grep -i "注入按钮"
+   ```
+   如果是 `EACCES: permission denied, open '.../static/index.html'`，说明该文件属主不是运行 NapCat 的用户
+   （常见于：面板/自定义脚本以 root 改写过 index.html）。**v1.0.2 起已改为"临时文件 + rename"，
+   只依赖目录写权限，这种场景会自动成功**；旧版本可以一次性修属主：
 
-```bash
-docker exec napcat sh -c 'mv /app/napcat/static/index.html.napcat-importer.bak /app/napcat/static/index.html'
-```
+   ```bash
+   docker exec -u 0 <容器名> chown -R napcat:napcat /app/napcat/static
+   docker restart <容器名>          # 或在插件管理页把导入器关掉再打开，让注入重试
+   ```
+6. **若页面被别的工具反复重写**（例如你有面板脚本/定时任务统一改 `index.html`）：
+   v1.0.2 起默认开启守护注入，被覆盖后自动补回：
+
+   | 触发方式 | 反应速度 |
+   |---|---|
+   | 容器内进程改写（含插件自身） | **事件驱动**，`fs.watch` 监听目录 + 300ms 防抖 → **实测约 0.3 秒** |
+   | 宿主机 `docker cp` 回写进容器 | inotify **不保证**派发（`docker cp` 直接写 overlay 的 upperdir，绕过挂载），由轮询兜底 → **默认 5 秒** |
+   | 周期 | 由配置 `injectWatchIntervalMs` 控制（默认 `5000`，设 `0` 则只依赖事件） |
+
+   **要不要改你外部脚本？看它怎么判断：**
+
+   - 若它是**幂等/标记判断**（例如宝塔脚本里那句 `✓ index.html 已是目标状态，跳过`），
+     **不需要改**：插件注入的内容不参与它的标记计数，它会继续跳过，两边不会互相覆盖。
+   - 只有当它**真的重建**时（换版本、改端口、`force=true`、标记计数不对）才会冲掉注入，
+     此时守护会在上面那张表的时间内补回（容器内写入 ~0.3s；`docker cp` 写入 ≤`injectWatchIntervalMs`）。
+   - 想要"零空窗"（连那 0.3–5 秒都不要）时，才需要把它模板里也加上同一段注入：
+
+     ```html
+     <!-- napcat-plugin-importer -->
+     <script src="/plugin/napcat-plugin-importer/files/static/inject.js" defer></script>
+     ```
+
+     （加完可以 `injectWatch: false` 关掉守护。）
+
+   顺带说明版本差异：守护注入是 **v1.0.2** 才引入的（当时是固定 60 秒轮询），
+   **v1.0.4** 起改为"`fs.watch` 事件驱动 + 5 秒轮询兜底"；
+   想用回 60 秒的节奏，把配置 `injectWatchIntervalMs` 设为 `60000` 即可，无需改代码。
 
 ## 目录结构
 
@@ -216,6 +322,8 @@ docker exec napcat sh -c 'mv /app/napcat/static/index.html.napcat-importer.bak /
 napcat-plugin-importer/
 ├── package.json          # 插件元信息（name 即插件 ID）
 ├── index.mjs             # 插件主体：鉴权 / 路由 / 页面 / zip 解压 / 白名单处理 / 按钮注入
+├── tools/
+│   └── napcat-cred.sh    # 纯 shell 换取 WebUI 登录凭证（Authorization 用）
 └── webui/
     ├── import.html       # 侧边栏「扩展页面」用的导入界面
     └── inject.js         # 注入到 WebUI 主页面、把按钮放回「插件管理」页的脚本

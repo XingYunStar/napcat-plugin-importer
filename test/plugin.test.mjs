@@ -15,6 +15,7 @@ const PLUGINS = path.join(ROOT, 'plugins');
 fs.mkdirSync(PLUGINS, { recursive: true });
 
 let pass = 0, fail = 0;
+const tick = (ms) => new Promise(r => setTimeout(r, ms));
 const check = (name, cond, extra = '') => {
   if (cond) { pass++; console.log('  ✅', name, extra); } else { fail++; console.log('  ❌', name, extra); }
 };
@@ -428,6 +429,20 @@ console.log('\n【10】 WebUI「导入插件」按钮注入（插件管理页）
   check('injectButton=false 时不注入', !fs.readFileSync(idx, 'utf8').includes('inject.js'));
   fs.rmSync(cfgFile, { force: true });
 
+  // 原子写入 & 守护注入
+  check('writeFileAtomic 能替换内容且不留临时文件', (() => {
+    const f = path.join(ROOT, 'atomic.txt');
+    fs.writeFileSync(f, 'old');
+    const how = mod.writeFileAtomic(f, 'new-content');
+    const left = fs.readdirSync(ROOT).filter(n => n.startsWith('.napcat-importer.') && n.endsWith('.tmp'));
+    return fs.readFileSync(f, 'utf8') === 'new-content' && left.length === 0 && (how === 'rename' || how === 'write');
+  })());
+  check('注入被覆盖后 ensureWebUiInjection 会补回', (() => {
+    fs.writeFileSync(idx, ORIGINAL);                                  // 模拟被别的工具重写
+    const again = mod.ensureWebUiInjection(ctx);
+    return again === true && fs.readFileSync(idx, 'utf8').includes('__napcatImporterBtnLoaded');
+  })());
+
   // 注入脚本本体
   const jsPath = path.join(ctx.pluginPath, 'webui', 'inject.js');
   const js = fs.readFileSync(jsPath, 'utf8');
@@ -440,6 +455,33 @@ console.log('\n【10】 WebUI「导入插件」按钮注入（插件管理页）
   check('inject.js 锚点缺失时有右下角兜底按钮', js.includes('injectFab') && js.includes('FAB_DELAY'));
   check('inject.js 有 SPA 重注入（MutationObserver）', js.includes('MutationObserver') && js.includes('setInterval'));
   check('inject.js 凭证失败时提示输入口令', js.includes('window.prompt') && js.includes('napcat-importer-token'));
+}
+
+
+console.log('\n【11】 守护注入：被外部工具覆盖后自动补回（事件驱动 + 轮询兜底）');
+{
+  const staticDir = path.join(ROOT, 'static');
+  const idx = path.join(staticDir, 'index.html');
+  const ORIG = '<!doctype html>\n<html><body><div id="root"></div></body></html>\n';
+  const cfgFile = path.join(ROOT, 'data', 'importer', 'config.json');
+  fs.writeFileSync(idx, ORIG);
+  fs.mkdirSync(path.dirname(cfgFile), { recursive: true });
+  fs.writeFileSync(cfgFile, JSON.stringify({ injectWatchIntervalMs: 120 }));  // 测试用：短间隔
+  await mod.plugin_init(ctx);
+  check('init 时注入成功', fs.readFileSync(idx, 'utf8').includes('__napcatImporterBtnLoaded'));
+
+  // 模拟“面板脚本以 root 重写 index.html”，把注入冲掉
+  fs.writeFileSync(idx, ORIG + '<!-- 外部工具重写 -->\n');
+  await tick(500);
+  check('被覆盖后自动补回（≤500ms）', fs.readFileSync(idx, 'utf8').includes('__napcatImporterBtnLoaded'));
+  check('补回后外部工具的内容仍在（不是整文件覆盖）', fs.readFileSync(idx, 'utf8').includes('外部工具重写'));
+
+  // cleanup 之后不应再补
+  await mod.plugin_cleanup(ctx);
+  fs.writeFileSync(idx, ORIG);
+  await tick(400);
+  check('cleanup 后停止守护（不再自动补回）', !fs.readFileSync(idx, 'utf8').includes('__napcatImporterBtnLoaded'));
+  fs.rmSync(cfgFile, { force: true });
 }
 
 console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====`);

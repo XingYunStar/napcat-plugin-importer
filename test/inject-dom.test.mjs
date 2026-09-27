@@ -208,5 +208,22 @@ console.log('\n【G】 锚点缺失时的右下角兜底按钮');
   dom2.window.close();
 }
 
+
+console.log('\n【H】 点侧边栏切换路由 → 立即出现（不等轮询）');
+{
+  const { w } = makeDom();   // 初始在 /webui/plugins 但 DOM 里还没有锚点
+  const root = w.document.getElementById('root');
+  root.innerHTML = '';       // 模拟"还没进插件管理页"
+  await tick(50);
+  check('此时确实没有按钮', !w.document.querySelector('[data-napcat-importer-btn]'));
+  // 模拟 React Router 的 pushState + 紧接着渲染出插件管理页
+  w.history.pushState({}, '', '/webui/plugins');
+  root.innerHTML = '<div class="flex mb-6 items-center gap-4"><h1 class="text-2xl font-bold">插件管理</h1></div>';
+  await tick(60);            // 远小于 MutationObserver 的 250ms 防抖与 1.5s 轮询
+  check('pushState 后 60ms 内按钮已出现', !!w.document.querySelector('[data-napcat-importer-btn]'));
+  check('history.pushState 仍能正常工作（未被破坏）', typeof w.history.pushState === 'function' && w.location.pathname === '/webui/plugins');
+  w.close();
+}
+
 console.log(`\n===== DOM 测试结果：${pass} 通过 / ${fail} 失败 =====`);
 process.exit(fail ? 1 : 0);

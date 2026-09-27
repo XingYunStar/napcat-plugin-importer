@@ -260,6 +260,27 @@
   inject();
   // 启动后的快速重试阶梯：SPA 首屏渲染 / 路由切换后按钮更快出现，兜底按钮也不用等轮询
   [300, 800, 1500, 3000, 6000].forEach(function (t) { setTimeout(inject, t); });
+
+  // 路由变化立即重试：点侧边栏切换页面走的是 history.pushState，
+  // 它不会触发任何 DOM 事件，光靠 MutationObserver/轮询会慢半拍
+  (function hookHistory () {
+    try {
+      ['pushState', 'replaceState'].forEach(function (k) {
+        var orig = window.history[k];
+        if (typeof orig !== 'function' || orig.__napcatImporterHooked) return;
+        var wrapped = function () {
+          var r = orig.apply(this, arguments);
+          setTimeout(inject, 0);
+          return r;
+        };
+        wrapped.__napcatImporterHooked = true;
+        window.history[k] = wrapped;
+      });
+    } catch (e) { /* ignore */ }
+    window.addEventListener('popstate', function () { setTimeout(inject, 0); });
+    window.addEventListener('hashchange', function () { setTimeout(inject, 0); });
+  })();
+
   var pending = false;
   try {
     new MutationObserver(function () {
