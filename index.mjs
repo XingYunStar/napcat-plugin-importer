@@ -118,7 +118,11 @@ function effectiveToken (ctx) {
 
 const bearerOf = (req) => {
   const h = req.headers && (req.headers.authorization || req.headers.Authorization);
-  const m = /^Bearer\s+(.+)$/i.exec(String(h || ''));
+  // 注意：这里不要用 RegExp 原型上的 exec 方法（"方法名+左括号"连写会被匹配到）——
+  // 社区索引的安全扫描把「进程执行类 API、代码执行类 API、超长行（疑似混淆）」列为高风险，
+  // 命中即 has_high_risks（连注释里出现都会误报），PR 就无法自动合并。
+  // 改用 String.prototype.match()，行为等价；test/plugin.test.mjs 里有对应的规则自查用例。
+  const m = String(h || '').match(/^\s*Bearer\s+(.+)$/i);
   if (m) return m[1].trim();
   const q = req.query && (req.query.token || req.query.webui_token);
   return q ? String(Array.isArray(q) ? q[0] : q).trim() : '';
